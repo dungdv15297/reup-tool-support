@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Auto Translator & TTS - Tự động phiên dịch và lồng tiếng bằng AI local">
+    <title>Auto Translator & TTS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">
+                <span class="logo-icon">🎬</span>
+                <h1>Auto Translator & TTS</h1>
+            </div>
+            <p class="subtitle">Phiên dịch & Lồng tiếng tự động bằng AI Local</p>
+        </header>
+
+        <!-- Main Input Section -->
+        <section class="input-section glass-card">
+            <h2 class="section-title">
+                <span class="icon">📁</span> Thiết lập chung
+            </h2>
+            <div class="input-grid">
+                <div class="form-group">
+                    <label>File đầu vào (.srt / .txt)</label>
+                    <div class="file-picker-wrapper">
+                        <button class="btn-picker" id="btn-pick-file">
+                            <span>📄</span> Chọn file...
+                        </button>
+                        <span class="file-name active" id="file-name-display">Chưa chọn file</span>
+                    </div>
+                    <input type="hidden" id="file-path">
+                </div>
+                <div class="form-group">
+                    <label for="model-select">🧠 Não AI (LLM Model)</label>
+                    <div class="select-wrapper">
+                        <select id="model-select">
+                            <option value="">Đang tải models...</option>
+                        </select>
+                        <button class="btn-icon" id="refresh-models" title="Làm mới danh sách models">🔄</button>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>📂 Thư mục Output</label>
+                    <div class="file-picker-wrapper">
+                        <button class="btn-picker" id="btn-pick-folder">
+                            <span>📂</span> Chọn thư mục...
+                        </button>
+                        <span class="file-name active" id="output-dir-display">Chưa chọn thư mục</span>
+                    </div>
+                    <input type="hidden" id="output-dir">
+                </div>
+            </div>
+        </section>
+
+        <!-- AI Resource Manager -->
+        <section class="ai-manager glass-card" id="ai-manager-section">
+            <div class="resource-header">
+                <h2 class="section-title">
+                    <span class="icon">🤖</span> Quản lý Tài nguyên AI
+                </h2>
+                <span class="resource-badge badge-ai">1-Click</span>
+            </div>
+
+            <!-- Ollama Status -->
+            <div class="ollama-status" id="ollama-status">
+                <span class="status-dot" id="ollama-dot"></span>
+                <span class="status-text" id="ollama-status-text">Đang kiểm tra Ollama...</span>
+            </div>
+
+            <!-- Models List -->
+            <div class="models-list" id="models-list">
+                <div class="models-list-header">
+                    <span class="models-label">Models đã cài:</span>
+                    <button class="btn-icon btn-sm" id="btn-refresh-ai" title="Làm mới">🔄</button>
+                </div>
+                <div class="models-chips" id="models-chips">
+                    <span class="model-chip empty">Chưa có model nào</span>
+                </div>
+            </div>
+
+            <!-- Download Section -->
+            <div class="download-section" id="download-section">
+                <div class="download-input-row">
+                    <input type="text" id="model-name-input" placeholder="Nhập tên model (VD: qwen2.5:14b)">
+                    <button class="btn btn-download" id="btn-download-model">
+                        <span class="btn-icon-left">⬇️</span>
+                        Tải Dữ Liệu AI
+                    </button>
+                    <button class="btn btn-cancel-download hidden" id="btn-cancel-download" title="Hủy tải">
+                        ✕
+                    </button>
+                </div>
+
+                <!-- Progress Bar -->
+                <div class="progress-container hidden" id="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <span class="progress-text" id="progress-text">Đang chờ...</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Two Column Resources -->
+        <div class="resources-grid">
+            <!-- Resource 1: Translator -->
+            <section class="resource-card glass-card" id="translator-section">
+                <div class="resource-header">
+                    <h2 class="section-title">
+                        <span class="icon">🌐</span> Phiên dịch viên
+                    </h2>
+                    <span class="resource-badge">Resource 1</span>
+                </div>
+                <p class="resource-desc">Phân tích ngữ cảnh, chuyển ngữ & định hình văn phong kịch bản</p>
+
+                <div class="form-group">
+                    <label for="source-lang">Ngôn ngữ Nguồn</label>
+                    <select id="source-lang">
+                        <option value="auto" selected>🔍 Tự phát hiện / Auto-detect</option>
+                        <option value="Tiếng Anh">🇬🇧 Tiếng Anh</option>
+                        <option value="Tiếng Trung">🇨🇳 Tiếng Trung</option>
+                        <option value="Tiếng Nhật">🇯🇵 Tiếng Nhật</option>
+                        <option value="Tiếng Hàn">🇰🇷 Tiếng Hàn</option>
+                        <option value="Tiếng Pháp">🇫🇷 Tiếng Pháp</option>
+                        <option value="Tiếng Tây Ban Nha">🇪🇸 Tiếng Tây Ban Nha</option>
+                        <option value="Tiếng Thái">🇹🇭 Tiếng Thái</option>
+                        <option value="Tiếng Việt">🇻🇳 Tiếng Việt</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="target-lang">Ngôn ngữ Đích</label>
+                    <select id="target-lang">
+                        <option value="Tiếng Việt" selected>🇻🇳 Tiếng Việt</option>
+                        <option value="Tiếng Anh">🇬🇧 Tiếng Anh</option>
+                        <option value="Tiếng Trung">🇨🇳 Tiếng Trung</option>
+                        <option value="Tiếng Nhật">🇯🇵 Tiếng Nhật</option>
+                        <option value="Tiếng Hàn">🇰🇷 Tiếng Hàn</option>
+                        <option value="Tiếng Pháp">🇫🇷 Tiếng Pháp</option>
+                        <option value="Tiếng Tây Ban Nha">🇪🇸 Tiếng Tây Ban Nha</option>
+                        <option value="Tiếng Thái">🇹🇭 Tiếng Thái</option>
+                    </select>
+                </div>
+
+                <button class="btn btn-primary btn-translate" id="btn-translate">
+                    <span class="btn-icon-left">🚀</span>
+                    Bắt đầu Dịch
+                </button>
+            </section>
+
+            <!-- Resource 2: TTS -->
+            <section class="resource-card glass-card" id="tts-section">
+                <div class="resource-header">
+                    <h2 class="section-title">
+                        <span class="icon">🎙️</span> Thuyết minh viên
+                    </h2>
+                    <span class="resource-badge badge-alt">Resource 2</span>
+                </div>
+                <p class="resource-desc">Chuyển đổi văn bản đã dịch thành file âm thanh</p>
+
+                <div class="form-group">
+                    <label>Phong cách đọc</label>
+                    <div class="preset-cards" id="preset-cards">
+                        <label class="preset-card active" data-preset="commercial">
+                            <input type="radio" name="voice-preset" value="commercial" checked>
+                            <div class="preset-content">
+                                <span class="preset-icon">⚡</span>
+                                <strong>X - Quảng cáo</strong>
+                                <small>Tươi sáng, dứt khoát, năng lượng cao</small>
+                            </div>
+                        </label>
+                        <label class="preset-card" data-preset="recap">
+                            <input type="radio" name="voice-preset" value="recap">
+                            <div class="preset-content">
+                                <span class="preset-icon">🎬</span>
+                                <strong>Y - Review Phim</strong>
+                                <small>Dồn dập, lôi cuốn, nhấn nhá twist</small>
+                            </div>
+                        </label>
+                        <label class="preset-card" data-preset="storytelling">
+                            <input type="radio" name="voice-preset" value="storytelling">
+                            <div class="preset-content">
+                                <span class="preset-icon">🌙</span>
+                                <strong>Z - Storytelling</strong>
+                                <small>Trầm tĩnh, ma mị, hồi hộp</small>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                <button class="btn btn-secondary btn-tts" id="btn-tts" disabled>
+                    <span class="btn-icon-left">🔊</span>
+                    Bắt đầu TTS
+                </button>
+            </section>
+        </div>
+
+        <!-- Console / Progress Log -->
+        <section class="console-section glass-card">
+            <div class="console-header">
+                <h2 class="section-title">
+                    <span class="icon">📋</span> Console
+                </h2>
+                <button class="btn-icon btn-clear-console" id="btn-clear-console" title="Xóa log">🗑️</button>
+            </div>
+            <div class="console-output" id="console-output">
+                <div class="console-line welcome">
+                    <span class="timestamp">[System]</span>
+                    <span>Sẵn sàng. Hãy chọn file và cài đặt để bắt đầu.</span>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

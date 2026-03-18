@@ -1,0 +1,5 @@
+flask
+edge-tts
+requests
+pydub
+pywebview

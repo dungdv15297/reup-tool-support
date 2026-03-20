@@ -1,0 +1,6 @@
+edge-tts
+pysrt
+pydub
+requests
+boto3
+PyQt6

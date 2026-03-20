@@ -15,6 +15,20 @@ CancelCallback = Optional[Callable[[], bool]]
 DEFAULT_MAX_BATCH_LINES = 18
 DEFAULT_MAX_BATCH_CHARS = 2400
 DEFAULT_MAX_CONCURRENT = 3
+PROVIDER_TUNING = {
+    "deepseek": {
+        "max_lines": 22,
+        "max_chars": 3200,
+        "max_concurrent": 4,
+        "request_stagger_seconds": 0.12,
+    },
+    "google": {
+        "max_lines": 18,
+        "max_chars": 2600,
+        "max_concurrent": 4,
+        "request_stagger_seconds": 0.18,
+    },
+}
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/chat/completions"
 GOOGLE_BASE_URL_TEMPLATE = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GOOGLE_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -44,6 +58,7 @@ SYSTEM_PROMPT = (
 class TranslationItem:
     item_id: int
     text: str
+    max_chars: Optional[int] = None
 
 
 def _progress(callback: ProgressCallback, percent: float, message: str) -> None:
@@ -54,6 +69,34 @@ def _progress(callback: ProgressCallback, percent: float, message: str) -> None:
 def build_job_hash(input_type: str, payload: str, source_lang: str, target_lang: str) -> str:
     raw = f"{input_type}|{source_lang}|{target_lang}|{payload}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
+
+
+def get_provider_tuning(llm_provider: str) -> Dict[str, float]:
+    return PROVIDER_TUNING.get(
+        llm_provider,
+        {
+            "max_lines": DEFAULT_MAX_BATCH_LINES,
+            "max_chars": DEFAULT_MAX_BATCH_CHARS,
+            "max_concurrent": DEFAULT_MAX_CONCURRENT,
+            "request_stagger_seconds": 0.12,
+        },
+    )
+
+
+class RateLimitError(RuntimeError):
+    def __init__(self, retry_after_seconds: float = 0.0, message: str = "429"):
+        super().__init__(message)
+        self.retry_after_seconds = max(0.0, float(retry_after_seconds or 0.0))
+
+
+def _extract_retry_after_seconds(response: requests.Response) -> float:
+    retry_after = response.headers.get("Retry-After", "").strip()
+    if not retry_after:
+        return 0.0
+    try:
+        return max(0.0, float(retry_after))
+    except ValueError:
+        return 0.0
 
 
 def batch_items(
@@ -113,17 +156,42 @@ def estimate_job_tokens(items: List[TranslationItem]) -> Dict[str, Any]:
     }
 
 
+def _extract_google_error(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return (response.text or "").strip()
+    error = payload.get("error", {})
+    details = error.get("message") or payload.get("message") or ""
+    status = error.get("status") or ""
+    if details and status:
+        return f"{status}: {details}"
+    return details or status or (response.text or "").strip()
+
+
+def _google_auth_params(api_key: str) -> Dict[str, str]:
+    return {"key": api_key}
+
+
+def _google_auth_headers(api_key: str) -> Dict[str, str]:
+    return {"x-goog-api-key": api_key}
+
+
 def list_google_models(api_key: str) -> List[str]:
     if not api_key.strip():
         raise RuntimeError("Bạn chưa nhập Google API key.")
     response = requests.get(
         GOOGLE_MODELS_URL,
-        headers={"x-goog-api-key": api_key},
-        params={"pageSize": 1000},
+        headers=_google_auth_headers(api_key),
+        params=_google_auth_params(api_key),
         timeout=60,
     )
     if response.status_code in {401, 403}:
-        raise RuntimeError("Google API key không hợp lệ hoặc chưa được cấp quyền Gemini API.")
+        details = _extract_google_error(response)
+        raise RuntimeError(
+            "Google API key không hợp lệ hoặc chưa được cấp quyền Gemini API."
+            + (f" Chi tiết từ Google: {details}" if details else "")
+        )
     response.raise_for_status()
     data = response.json()
     models = []
@@ -149,13 +217,21 @@ async def _call_deepseek(
     target_lang: str,
     retries: int = 4,
 ) -> Dict[int, str]:
-    payload_items = [{"id": item.item_id, "text": item.text} for item in items]
+    payload_items = []
+    for item in items:
+        payload = {"id": item.item_id, "text": item.text}
+        if item.max_chars is not None:
+            payload["max_chars"] = item.max_chars
+        payload_items.append(payload)
     user_prompt = (
         f"Dịch danh sách sau từ {LANGUAGE_OPTIONS.get(source_lang, source_lang)} "
         f"sang {LANGUAGE_OPTIONS.get(target_lang, target_lang)}.\n"
         "Trả về JSON object với cấu trúc: "
         '{"items":[{"id":1,"translated":"..."}, ...]}. '
         "Giữ nguyên toàn bộ id, không thêm hoặc bớt phần tử.\n"
+        "Nếu phần tử có trường max_chars thì translated phải cố gắng không vượt quá số ký tự đó. "
+        "Hãy ưu tiên câu ngắn, gọn, tự nhiên, liền mạch, giữ đúng ý và ngữ cảnh; "
+        "không được dịch cụt lủn hay liệt kê máy móc chỉ để ép độ dài.\n"
         f"Danh sách nguồn:\n{json.dumps(payload_items, ensure_ascii=False)}"
     )
 
@@ -183,7 +259,7 @@ async def _call_deepseek(
         if response.status_code == 402:
             raise RuntimeError("Tài khoản DeepSeek không đủ số dư hoặc bị giới hạn thanh toán.")
         if response.status_code == 429:
-            raise RuntimeError("429")
+            raise RateLimitError(_extract_retry_after_seconds(response))
 
         response.raise_for_status()
         data = response.json()
@@ -200,8 +276,8 @@ async def _call_deepseek(
             return await asyncio.to_thread(_sync_request)
         except Exception as exc:
             last_error = exc
-            if str(exc) == "429" and attempt < retries:
-                await asyncio.sleep(min(2 * attempt, 8))
+            if isinstance(exc, RateLimitError) and attempt < retries:
+                await asyncio.sleep(max(exc.retry_after_seconds, min(2 * attempt, 8)))
                 continue
             if attempt < retries and any(token in str(exc).lower() for token in ["timeout", "tempor", "502", "503", "504"]):
                 await asyncio.sleep(min(2 * attempt, 8))
@@ -233,13 +309,21 @@ async def _call_google(
     target_lang: str,
     retries: int = 4,
 ) -> Dict[int, str]:
-    payload_items = [{"id": item.item_id, "text": item.text} for item in items]
+    payload_items = []
+    for item in items:
+        payload = {"id": item.item_id, "text": item.text}
+        if item.max_chars is not None:
+            payload["max_chars"] = item.max_chars
+        payload_items.append(payload)
     user_prompt = (
         f"Dịch danh sách sau từ {LANGUAGE_OPTIONS.get(source_lang, source_lang)} "
         f"sang {LANGUAGE_OPTIONS.get(target_lang, target_lang)}.\n"
         "Trả về duy nhất JSON object với cấu trúc: "
         '{"items":[{"id":1,"translated":"..."}, ...]}. '
         "Giữ nguyên toàn bộ id, không thêm hoặc bớt phần tử.\n"
+        "Nếu phần tử có trường max_chars thì translated phải cố gắng không vượt quá số ký tự đó. "
+        "Hãy ưu tiên câu ngắn, gọn, tự nhiên, liền mạch, giữ đúng ý và ngữ cảnh; "
+        "không được dịch cụt lủn hay liệt kê máy móc chỉ để ép độ dài.\n"
         f"Danh sách nguồn:\n{json.dumps(payload_items, ensure_ascii=False)}"
     )
 
@@ -248,8 +332,9 @@ async def _call_google(
             GOOGLE_BASE_URL_TEMPLATE.format(model=model),
             headers={
                 "Content-Type": "application/json",
-                "x-goog-api-key": api_key,
+                **_google_auth_headers(api_key),
             },
+            params=_google_auth_params(api_key),
             json={
                 "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
                 "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -264,9 +349,13 @@ async def _call_google(
         if response.status_code == 400:
             raise RuntimeError(f"Google Gemini request không hợp lệ: {response.text}")
         if response.status_code == 401 or response.status_code == 403:
-            raise RuntimeError("Google API key không hợp lệ hoặc chưa được cấp quyền Gemini API.")
+            details = _extract_google_error(response)
+            raise RuntimeError(
+                "Google API key không hợp lệ hoặc chưa được cấp quyền Gemini API."
+                + (f" Chi tiết từ Google: {details}" if details else "")
+            )
         if response.status_code == 429:
-            raise RuntimeError("429")
+            raise RateLimitError(_extract_retry_after_seconds(response))
 
         response.raise_for_status()
         data = response.json()
@@ -291,8 +380,8 @@ async def _call_google(
             return await asyncio.to_thread(_sync_request)
         except Exception as exc:
             last_error = exc
-            if str(exc) == "429" and attempt < retries:
-                await asyncio.sleep(min(2 * attempt, 8))
+            if isinstance(exc, RateLimitError) and attempt < retries:
+                await asyncio.sleep(max(exc.retry_after_seconds, min(2 * attempt, 8)))
                 continue
             if attempt < retries and any(token in str(exc).lower() for token in ["expecting", "json", "candidate hợp lệ", "thiếu số lượng mục"]):
                 await asyncio.sleep(min(2 * attempt, 8))
@@ -326,17 +415,43 @@ async def translate_items(
         _progress(progress_callback, 1.0, "Không có batch mới, dữ liệu đã sẵn sàng để xuất.")
         return translations
 
-    if llm_provider == "google":
-        batches = batch_items(pending_items, max_lines=12, max_chars=1600)
-    else:
-        batches = batch_items(pending_items)
-    semaphore = asyncio.Semaphore(max(1, max_concurrent))
+    tuning = get_provider_tuning(llm_provider)
+    batches = batch_items(
+        pending_items,
+        max_lines=int(tuning["max_lines"]),
+        max_chars=int(tuning["max_chars"]),
+    )
+    effective_concurrency = max(1, min(int(tuning["max_concurrent"]), int(max_concurrent or DEFAULT_MAX_CONCURRENT)))
+    semaphore = asyncio.Semaphore(effective_concurrency)
     completed = 0
     total_batches = len(batches)
+    request_stagger = float(tuning["request_stagger_seconds"])
+    cooldown_lock = asyncio.Lock()
+    cooldown_until = 0.0
+
+    async def _wait_for_cooldown():
+        nonlocal cooldown_until
+        while True:
+            async with cooldown_lock:
+                now = asyncio.get_running_loop().time()
+                remaining = cooldown_until - now
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(remaining, 1.0))
+
+    async def _set_cooldown(seconds: float):
+        nonlocal cooldown_until
+        delay = max(seconds, 1.0)
+        async with cooldown_lock:
+            now = asyncio.get_running_loop().time()
+            cooldown_until = max(cooldown_until, now + delay)
 
     async def _run_batch(batch_index: int, batch_items_list: List[TranslationItem]):
         nonlocal completed
         async with semaphore:
+            if batch_index > 0 and request_stagger > 0:
+                await asyncio.sleep((batch_index % effective_concurrency) * request_stagger)
+            await _wait_for_cooldown()
             if cancel_callback and cancel_callback():
                 raise TranslationCancelledError("Đã dừng dịch theo yêu cầu người dùng.")
             start_line = batch_items_list[0].item_id
@@ -347,21 +462,29 @@ async def translate_items(
                 f"Đang dịch batch {batch_index + 1}/{total_batches} (mục {start_line}-{end_line})...",
             )
             if llm_provider == "google":
-                translated = await _call_google(
-                    api_key=api_key,
-                    model=model,
-                    items=batch_items_list,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                )
+                try:
+                    translated = await _call_google(
+                        api_key=api_key,
+                        model=model,
+                        items=batch_items_list,
+                        source_lang=source_lang,
+                        target_lang=target_lang,
+                    )
+                except RateLimitError as exc:
+                    await _set_cooldown(max(exc.retry_after_seconds, 2.0))
+                    raise
             else:
-                translated = await _call_deepseek(
-                    api_key=api_key,
-                    model=model,
-                    items=batch_items_list,
-                    source_lang=source_lang,
-                    target_lang=target_lang,
-                )
+                try:
+                    translated = await _call_deepseek(
+                        api_key=api_key,
+                        model=model,
+                        items=batch_items_list,
+                        source_lang=source_lang,
+                        target_lang=target_lang,
+                    )
+                except RateLimitError as exc:
+                    await _set_cooldown(max(exc.retry_after_seconds, 2.0))
+                    raise
             if cancel_callback and cancel_callback():
                 raise TranslationCancelledError("Đã dừng dịch theo yêu cầu người dùng.")
             translations.update(translated)
@@ -395,10 +518,12 @@ def render_plain_text(items: List[TranslationItem], translations: Dict[int, str]
     return "\n".join(rendered)
 
 
-def build_srt_items(subs) -> List[TranslationItem]:
+def build_srt_items(subs, chars_per_second: float = 32.0) -> List[TranslationItem]:
     items = []
     for index, sub in enumerate(subs):
-        items.append(TranslationItem(index + 1, sub.text.strip() or " "))
+        duration_seconds = max(0.0, sub.duration.ordinal / 1000.0)
+        max_chars = max(1, int(duration_seconds * float(chars_per_second))) if duration_seconds > 0 else 1
+        items.append(TranslationItem(index + 1, sub.text.strip() or " ", max_chars=max_chars))
     return items
 
 

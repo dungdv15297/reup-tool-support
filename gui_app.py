@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 from datetime import datetime
+from typing import Callable, Optional
 
 from PyQt6.QtCore import QUrl, Qt, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
@@ -24,6 +25,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -64,6 +66,51 @@ from tts_service import (
 
 def build_timestamp_name(prefix: str, extension: str) -> str:
     return f"{prefix}_{datetime.now().strftime('%d%m%y_%H%M%S')}.{extension}"
+
+
+class FileDropArea(QLabel):
+    def __init__(self, prompt: str, file_handler: Callable[[str], None], parent: Optional[QWidget] = None):
+        super().__init__(prompt, parent)
+        self.file_handler = file_handler
+        self.default_style = (
+            "border: 2px dashed #475569; border-radius: 10px; padding: 18px; "
+            "color: #cbd5e1; background: rgba(71, 85, 105, 0.08);"
+        )
+        self.active_style = (
+            "border: 2px dashed #38bdf8; border-radius: 10px; padding: 18px; "
+            "color: #e2e8f0; background: rgba(56, 189, 248, 0.12);"
+        )
+        self.setAcceptDrops(True)
+        self.setWordWrap(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet(self.default_style)
+
+    def dragEnterEvent(self, event):
+        urls = event.mimeData().urls()
+        if urls and any(url.isLocalFile() and url.toLocalFile().lower().endswith(".srt") for url in urls):
+            event.acceptProposedAction()
+            self.setStyleSheet(self.active_style)
+            return
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet(self.default_style)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        self.setStyleSheet(self.default_style)
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+        for url in urls:
+            if url.isLocalFile():
+                file_path = url.toLocalFile()
+                if file_path.lower().endswith(".srt"):
+                    self.file_handler(file_path)
+                    event.acceptProposedAction()
+                    return
+        event.ignore()
 
 
 class App(QMainWindow):
@@ -206,29 +253,26 @@ class App(QMainWindow):
 
         tts_group = QGroupBox("API / Credentials cho nền tảng TTS")
         tts_form = QFormLayout(tts_group)
-        self.google_api_key = QLineEdit()
-        self.google_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.google_api_key.editingFinished.connect(self.persist_state)
-        tts_form.addRow("Google Cloud TTS API key:", self.google_api_key)
+        self.google_api_key, google_api_widget = self.create_secret_input()
+        self.google_api_key.textChanged.connect(self.persist_state)
+        tts_form.addRow("Google Cloud TTS API key (cho Thuyết minh viên):", google_api_widget)
         self.aws_access_key = QLineEdit()
-        self.aws_access_key.editingFinished.connect(self.persist_state)
+        self.aws_access_key.textChanged.connect(self.persist_state)
         tts_form.addRow("AWS access key:", self.aws_access_key)
-        self.aws_secret_key = QLineEdit()
-        self.aws_secret_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.aws_secret_key.editingFinished.connect(self.persist_state)
-        tts_form.addRow("AWS secret key:", self.aws_secret_key)
+        self.aws_secret_key, aws_secret_widget = self.create_secret_input()
+        self.aws_secret_key.textChanged.connect(self.persist_state)
+        tts_form.addRow("AWS secret key:", aws_secret_widget)
         self.aws_region = QLineEdit()
-        self.aws_region.editingFinished.connect(self.persist_state)
+        self.aws_region.textChanged.connect(self.persist_state)
         tts_form.addRow("AWS region:", self.aws_region)
-        self.vbee_api_token = QLineEdit()
-        self.vbee_api_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.vbee_api_token.editingFinished.connect(self.persist_state)
-        tts_form.addRow("Vbee token:", self.vbee_api_token)
+        self.vbee_api_token, vbee_token_widget = self.create_secret_input()
+        self.vbee_api_token.textChanged.connect(self.persist_state)
+        tts_form.addRow("Vbee token:", vbee_token_widget)
         self.vbee_tts_url = QLineEdit()
-        self.vbee_tts_url.editingFinished.connect(self.persist_state)
+        self.vbee_tts_url.textChanged.connect(self.persist_state)
         tts_form.addRow("Vbee URL:", self.vbee_tts_url)
         self.vbee_app_id = QLineEdit()
-        self.vbee_app_id.editingFinished.connect(self.persist_state)
+        self.vbee_app_id.textChanged.connect(self.persist_state)
         tts_form.addRow("Vbee app id:", self.vbee_app_id)
         self.vbee_response_mode = QComboBox()
         self.vbee_response_mode.addItems(["auto", "binary"])
@@ -242,14 +286,12 @@ class App(QMainWindow):
 
         llm_group = QGroupBox("API Key cho LLM")
         llm_form = QFormLayout(llm_group)
-        self.translator_deepseek_api_key = QLineEdit()
-        self.translator_deepseek_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.translator_deepseek_api_key.editingFinished.connect(self.persist_state)
-        llm_form.addRow("DeepSeek API key:", self.translator_deepseek_api_key)
-        self.translator_google_api_key = QLineEdit()
-        self.translator_google_api_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.translator_google_api_key.editingFinished.connect(self.persist_state)
-        llm_form.addRow("Google Gemini API key:", self.translator_google_api_key)
+        self.translator_deepseek_api_key, deepseek_widget = self.create_secret_input()
+        self.translator_deepseek_api_key.textChanged.connect(self.persist_state)
+        llm_form.addRow("DeepSeek API key:", deepseek_widget)
+        self.translator_google_api_key, gemini_widget = self.create_secret_input()
+        self.translator_google_api_key.textChanged.connect(self.persist_state)
+        llm_form.addRow("Google Gemini API key (cho Phiên dịch viên):", gemini_widget)
         layout.addWidget(llm_group)
 
         action_row = QHBoxLayout()
@@ -260,6 +302,28 @@ class App(QMainWindow):
         layout.addLayout(action_row)
         layout.addStretch(1)
         return page
+
+    def create_secret_input(self):
+        line_edit = QLineEdit()
+        line_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        wrapper = QWidget()
+        row = QHBoxLayout(wrapper)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(line_edit, 1)
+        toggle = QToolButton()
+        toggle.setText("👁")
+        toggle.setToolTip("Hiện/ẩn giá trị")
+        toggle.setCheckable(True)
+
+        def _toggle_secret(checked: bool):
+            line_edit.setEchoMode(
+                QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password
+            )
+
+        toggle.toggled.connect(_toggle_secret)
+        row.addWidget(toggle)
+        return line_edit, wrapper
 
     def open_settings_dialog(self):
         self.settings_dialog.exec()
@@ -367,6 +431,11 @@ class App(QMainWindow):
         self.btn_select_srt = QPushButton("Chọn file .srt")
         self.btn_select_srt.clicked.connect(self.select_tts_srt_file)
         srt_layout.addWidget(self.btn_select_srt)
+        self.tts_drop_area = FileDropArea(
+            "Kéo thả file .srt vào đây để nạp nhanh cho Thuyết minh viên.",
+            self.load_tts_srt_file,
+        )
+        srt_layout.addWidget(self.tts_drop_area)
         self.srt_info_label = QLabel("Chưa chọn file.")
         self.srt_info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.srt_info_label.setWordWrap(True)
@@ -466,11 +535,22 @@ class App(QMainWindow):
         grid.addWidget(QLabel("Ngôn ngữ đích:"), 1, 2)
         grid.addWidget(self.target_lang_combo, 1, 3)
 
+        self.chars_per_second_input = QLineEdit()
+        self.chars_per_second_input.setPlaceholderText("Ví dụ: 32")
+        self.chars_per_second_input.textChanged.connect(self.on_chars_per_second_changed)
+        grid.addWidget(QLabel("Giới hạn nói:"), 2, 0)
+        grid.addWidget(self.chars_per_second_input, 2, 1)
+
+        self.chars_per_second_note = QLabel("Áp dụng cho SRT: gửi giới hạn ký tự theo thời lượng subtitle vào prompt LLM.")
+        self.chars_per_second_note.setWordWrap(True)
+        self.chars_per_second_note.setStyleSheet("color: #475569;")
+        grid.addWidget(self.chars_per_second_note, 2, 2, 1, 2)
+
         self.translator_estimate_label = QLabel("Estimate tokens: chưa có dữ liệu.")
         self.translator_estimate_label.setWordWrap(True)
         self.translator_estimate_label.setStyleSheet("color: #475569;")
-        grid.addWidget(QLabel("Estimate:"), 2, 0)
-        grid.addWidget(self.translator_estimate_label, 2, 1, 1, 3)
+        grid.addWidget(QLabel("Estimate:"), 3, 0)
+        grid.addWidget(self.translator_estimate_label, 3, 1, 1, 3)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         layout.addLayout(grid)
@@ -511,6 +591,11 @@ class App(QMainWindow):
         self.btn_select_translator_srt = QPushButton("Chọn file .srt")
         self.btn_select_translator_srt.clicked.connect(self.select_translator_srt_file)
         srt_layout.addWidget(self.btn_select_translator_srt)
+        self.translator_drop_area = FileDropArea(
+            "Kéo thả file .srt vào đây để nạp nhanh cho Phiên dịch viên.",
+            self.load_translator_srt_file,
+        )
+        srt_layout.addWidget(self.translator_drop_area)
         self.translator_srt_info_label = QLabel("Chưa chọn file.")
         self.translator_srt_info_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.translator_srt_info_label.setWordWrap(True)
@@ -587,6 +672,9 @@ class App(QMainWindow):
         self.translator_google_api_key.setText(translator_state.get("api_keys", {}).get("google", ""))
         self.source_lang_combo.setCurrentIndex(max(0, self.source_lang_combo.findData(translator_state.get("preferences", {}).get("source_lang", "auto"))))
         self.target_lang_combo.setCurrentIndex(max(0, self.target_lang_combo.findData(translator_state.get("preferences", {}).get("target_lang", "vi"))))
+        self.chars_per_second_input.setText(
+            str(float(translator_state.get("preferences", {}).get("chars_per_second", 32.0))).rstrip("0").rstrip(".")
+        )
         self.translator_textbox.setPlainText(translator_state.get("text_input", ""))
         self.set_translator_output_dir(translator_state.get("output_dir", ""))
         self.translator_selected_srt_path = translator_state.get("selected_srt_path", "")
@@ -645,6 +733,7 @@ class App(QMainWindow):
                 "preferences": {
                     "source_lang": self.source_lang_combo.currentData() or "auto",
                     "target_lang": self.target_lang_combo.currentData() or "vi",
+                    "chars_per_second": self._current_chars_per_second(),
                 },
                 "text_input": self.translator_textbox.toPlainText(),
                 "selected_srt_path": self.translator_selected_srt_path or "",
@@ -684,7 +773,12 @@ class App(QMainWindow):
         provider = self.translator_provider_combo.currentData() or "deepseek"
         if provider != "google":
             return
-        api_key = self.translator_google_api_key.text().strip()
+        self.persist_state()
+        api_key = self._current_translator_api_key()
+        active_key, source = self._active_translator_google_key()
+        self.append_translator_log(
+            f"Đang load model Google Gemini bằng key nguồn {source}: {self._mask_secret(active_key)}"
+        )
         try:
             models = list_google_models(api_key)
             if not models:
@@ -712,11 +806,13 @@ class App(QMainWindow):
         if self.translator_srt_content:
             try:
                 subs = parse_srt(self.translator_srt_content)
-                items = build_srt_items(subs)
+                chars_per_second = self._current_chars_per_second()
+                items = build_srt_items(subs, chars_per_second=chars_per_second)
                 estimate = estimate_job_tokens(items)
+                max_chars_total = sum(item.max_chars or 0 for item in items)
                 self.translator_srt_estimate_label.setText(
                     f"{estimate['items']} dòng, {estimate['batches']} batch, ~{estimate['total_tokens']} tokens "
-                    f"(max batch ~{estimate['max_batch_tokens']})"
+                    f"(max batch ~{estimate['max_batch_tokens']}, giới hạn ~{max_chars_total} ký tự ở {int(chars_per_second)} ký tự/s)"
                 )
             except Exception:
                 self.translator_srt_estimate_label.setText("Estimate tokens file SRT: không đọc được nội dung.")
@@ -759,6 +855,18 @@ class App(QMainWindow):
     def on_translator_text_changed(self):
         self.persist_state()
         self.update_translator_estimate_labels()
+
+    def on_chars_per_second_changed(self):
+        self.persist_state()
+        self.update_translator_estimate_labels()
+
+    def _current_chars_per_second(self) -> float:
+        raw = (self.chars_per_second_input.text() or "").strip().replace(",", ".")
+        try:
+            value = float(raw)
+        except ValueError:
+            return 32.0
+        return max(1.0, min(200.0, value))
 
     def persist_state(self):
         if self._restoring_state:
@@ -878,12 +986,29 @@ class App(QMainWindow):
     def open_translator_output_dir(self):
         self._open_output_dir(getattr(self, "translator_output_dir", ""))
 
-    def _remove_temp_file(self, path: str | None):
+    def _remove_temp_file(self, path: Optional[str]):
         if path and os.path.exists(path):
             try:
                 os.remove(path)
             except OSError:
                 pass
+
+    def _mask_secret(self, value: str) -> str:
+        secret = (value or "").strip()
+        if not secret:
+            return "<empty>"
+        if len(secret) <= 10:
+            return secret[:2] + "***"
+        return f"{secret[:8]}...{secret[-4:]}"
+
+    def _active_translator_google_key(self) -> tuple[str, str]:
+        widget_key = self.translator_google_api_key.text().strip()
+        if widget_key:
+            return widget_key, "widget"
+        state_key = self.state.get("translator", {}).get("api_keys", {}).get("google", "").strip()
+        if state_key:
+            return state_key, "config"
+        return "", "missing"
 
     def load_tts_srt_file(self, file_path: str):
         with open(file_path, "r", encoding="utf-8") as handle:
@@ -1148,6 +1273,7 @@ class App(QMainWindow):
         save_state(self.build_state_from_ui())
 
     def run_translate_text(self, text, save_path):
+        self.persist_state()
         llm_provider = self.translator_provider_combo.currentData() or "deepseek"
         source_lang = self.source_lang_combo.currentData() or "auto"
         target_lang = self.target_lang_combo.currentData() or "vi"
@@ -1193,14 +1319,16 @@ class App(QMainWindow):
             self.translator_finished_signal.emit(f"Lỗi dịch văn bản: {exc}", False)
 
     def run_translate_srt(self, content, save_path):
+        self.persist_state()
         llm_provider = self.translator_provider_combo.currentData() or "deepseek"
         source_lang = self.source_lang_combo.currentData() or "auto"
         target_lang = self.target_lang_combo.currentData() or "vi"
+        chars_per_second = self._current_chars_per_second()
         model = self.translator_model_combo.currentText()
         api_key = self._current_translator_api_key()
         subs = parse_srt(content)
-        items = build_srt_items(subs)
-        job_hash = build_job_hash("srt", content, source_lang, target_lang)
+        items = build_srt_items(subs, chars_per_second=chars_per_second)
+        job_hash = build_job_hash("srt", f"{content}|cps={chars_per_second}", source_lang, target_lang)
         resume = self.state.get("translator", {}).get("resume", {})
         existing = parse_resume_payload(resume) if resume.get("job_hash") == job_hash else {}
         try:
@@ -1258,8 +1386,8 @@ class App(QMainWindow):
     def _current_translator_api_key(self) -> str:
         provider = self.translator_provider_combo.currentData() or "deepseek"
         if provider == "google":
-            return self.translator_google_api_key.text().strip()
-        return self.translator_deepseek_api_key.text().strip()
+            return self._active_translator_google_key()[0]
+        return self.translator_deepseek_api_key.text().strip() or self.state.get("translator", {}).get("api_keys", {}).get("deepseek", "").strip()
 
     def _update_tts_progress_ui(self, value, text):
         self.tts_progress_bar.setValue(value)

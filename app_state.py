@@ -47,6 +47,7 @@ DEFAULT_STATE: Dict[str, Any] = {
         "preferences": {
             "source_lang": "auto",
             "target_lang": "vi",
+            "chars_per_second": 32.0,
         },
         "text_input": "",
         "selected_srt_path": "",
@@ -94,6 +95,16 @@ def _normalize_legacy_state(data: Dict[str, Any]) -> Dict[str, Any]:
         translator["selected_llm_provider"] = "google" if model.startswith("gemini-") else "deepseek"
     translator.setdefault("api_keys", {})
     translator["api_keys"].setdefault("google", "")
+    translator.setdefault("preferences", {})
+    try:
+        legacy_words_per_second = translator["preferences"].get("words_per_second")
+        if "chars_per_second" not in translator["preferences"] and legacy_words_per_second is not None:
+            translator["preferences"]["chars_per_second"] = float(legacy_words_per_second) * 5.0
+        translator["preferences"]["chars_per_second"] = float(
+            translator["preferences"].get("chars_per_second", 32.0)
+        )
+    except (TypeError, ValueError):
+        translator["preferences"]["chars_per_second"] = 32.0
     normalized["translator"] = translator
 
     tts = normalized.get("tts", {})

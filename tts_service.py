@@ -218,6 +218,7 @@ class EdgeTTSProvider(BaseTTSProvider):
     provider_id = "edge"
     label = "Microsoft Edge TTS"
     config_help = "Không cần cấu hình thêm."
+    _voice_cache: Optional[List[VoiceOption]] = None
 
     def get_status(self) -> Dict[str, str]:
         if edge_tts is None:
@@ -225,10 +226,40 @@ class EdgeTTSProvider(BaseTTSProvider):
         return {"configured": "true", "message": "Sẵn sàng sử dụng."}
 
     def list_voices(self) -> List[VoiceOption]:
-        return [
+        fallback = [
             VoiceOption("vi-VN-HoaiMyNeural", "Hoài Mỹ", "vi-VN", "female"),
             VoiceOption("vi-VN-NamMinhNeural", "Nam Minh", "vi-VN", "male"),
         ]
+        if edge_tts is None:
+            return fallback
+        if self._voice_cache is not None:
+            return self._voice_cache
+        try:
+            raw_voices = asyncio.run(edge_tts.list_voices())
+            voices = []
+            for voice in raw_voices:
+                locale = voice.get("Locale", "")
+                short_name = voice.get("ShortName", "")
+                friendly_name = voice.get("FriendlyName", short_name)
+                gender = voice.get("Gender", "unknown").lower()
+                label = f"{friendly_name} ({locale})" if locale else friendly_name
+                voices.append(
+                    VoiceOption(
+                        short_name,
+                        label,
+                        locale,
+                        gender,
+                        metadata={"friendly_name": friendly_name},
+                    )
+                )
+            voices = sorted(
+                voices,
+                key=lambda item: (0 if item.language == "vi-VN" else 1, item.language, item.label.lower()),
+            )
+            self._voice_cache = voices or fallback
+            return self._voice_cache
+        except Exception:
+            return fallback
 
     async def synthesize(self, text: str, voice_id: str, speed: float, output_path: str) -> None:
         if edge_tts is None:

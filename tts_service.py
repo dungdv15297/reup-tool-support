@@ -110,6 +110,25 @@ def clamp_speed(speed: float) -> float:
     return max(0.9, min(2.0, round(value, 1)))
 
 
+def combine_audio_segments_on_timeline(
+    items: List[Dict[str, Any]],
+    loader: Optional[Callable[[Dict[str, Any]], AudioSegment]] = None,
+) -> AudioSegment:
+    load_segment = loader or (lambda item: AudioSegment.from_file(item["path"]))
+    combined_audio = AudioSegment.empty()
+
+    for item in sorted(items, key=lambda value: value["index"]):
+        segment_audio = load_segment(item)
+        start_ms = max(0, int(item.get("start_ms", 0)))
+        end_ms = max(start_ms, int(item.get("end_ms", start_ms + len(segment_audio))))
+        required_duration_ms = max(end_ms, start_ms + len(segment_audio))
+        if len(combined_audio) < required_duration_ms:
+            combined_audio += create_silence(required_duration_ms - len(combined_audio))
+        combined_audio = combined_audio.overlay(segment_audio, position=start_ms)
+
+    return combined_audio
+
+
 def speed_to_edge_rate(speed: float) -> str:
     percent = int(round((clamp_speed(speed) - 1.0) * 100))
     if percent >= 0:
@@ -813,19 +832,7 @@ async def process_srt_logic(
         if cancel_callback and cancel_callback():
             raise ProcessingCancelledError("Đã dừng xử lý theo yêu cầu người dùng.")
         _progress(progress_callback, 0.86, "Đang ghép các block audio...")
-
-        combined_audio = AudioSegment.empty()
-        current_time_ms = 0
-        for item in sorted(results, key=lambda value: value["index"]):
-            if cancel_callback and cancel_callback():
-                raise ProcessingCancelledError("Đã dừng xử lý theo yêu cầu người dùng.")
-            segment_audio = AudioSegment.from_file(item["path"])
-            gap = item["start_ms"] - current_time_ms
-            if gap > 0:
-                combined_audio += create_silence(gap)
-                current_time_ms += gap
-            combined_audio += segment_audio
-            current_time_ms += len(segment_audio)
+        combined_audio = combine_audio_segments_on_timeline(results)
 
         final_path = _tmp_mp3_path()
         combined_audio.export(final_path, format="mp3")

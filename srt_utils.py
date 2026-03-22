@@ -102,11 +102,16 @@ def normalize_srt_blocks(
         )
 
         merge_due_to_continuation = text[:1].islower() or text[:1] in {",", ".", ":", ";", "-", "(", "["}
-        if within_limits and (
-            merge_due_to_short
-            or (merge_due_to_sentence and merge_due_to_gap)
-            or (merge_due_to_continuation and merge_due_to_gap)
-        ):
+        should_merge = (
+            merge_due_to_gap
+            and (
+                merge_due_to_short
+                or merge_due_to_sentence
+                or merge_due_to_continuation
+            )
+        )
+
+        if within_limits and should_merge:
             buffer_item.text = (current_text + "\n" + text).strip()
             buffer_item.end = sub.end
             buffer_count += 1

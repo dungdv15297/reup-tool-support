@@ -559,16 +559,24 @@ class App(QMainWindow):
         grid.addWidget(QLabel("Ký tự tối đa được gộp:"), 3, 0)
         grid.addWidget(self.max_merged_chars_input, 3, 1)
 
-        self.normalize_srt_note = QLabel("SRT sẽ luôn được chuẩn hóa trước khi dịch; tham số này quyết định độ dài tối đa của mỗi cụm gộp.")
+        self.max_gap_ms_input = QLineEdit()
+        self.max_gap_ms_input.setPlaceholderText("Ví dụ: 320")
+        self.max_gap_ms_input.textChanged.connect(self.on_translator_srt_options_changed)
+        grid.addWidget(QLabel("Gap tối đa để gộp (ms):"), 3, 2)
+        grid.addWidget(self.max_gap_ms_input, 3, 3)
+
+        self.normalize_srt_note = QLabel(
+            "SRT sẽ luôn được chuẩn hóa trước khi dịch; bạn có thể khống chế độ dài cụm và khoảng cách thời gian tối đa giữa các subtitle được phép gộp."
+        )
         self.normalize_srt_note.setWordWrap(True)
         self.normalize_srt_note.setStyleSheet("color: #475569;")
-        grid.addWidget(self.normalize_srt_note, 3, 2, 1, 2)
+        grid.addWidget(self.normalize_srt_note, 4, 0, 1, 4)
 
         self.translator_estimate_label = QLabel("Estimate tokens: chưa có dữ liệu.")
         self.translator_estimate_label.setWordWrap(True)
         self.translator_estimate_label.setStyleSheet("color: #475569;")
-        grid.addWidget(QLabel("Estimate:"), 4, 0)
-        grid.addWidget(self.translator_estimate_label, 4, 1, 1, 3)
+        grid.addWidget(QLabel("Estimate:"), 5, 0)
+        grid.addWidget(self.translator_estimate_label, 5, 1, 1, 3)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         layout.addLayout(grid)
@@ -697,6 +705,9 @@ class App(QMainWindow):
         self.max_merged_chars_input.setText(
             str(float(translator_state.get("preferences", {}).get("max_merged_chars", 220.0))).rstrip("0").rstrip(".")
         )
+        self.max_gap_ms_input.setText(
+            str(float(translator_state.get("preferences", {}).get("max_gap_ms", 320.0))).rstrip("0").rstrip(".")
+        )
         self.translator_textbox.setPlainText(translator_state.get("text_input", ""))
         self.set_translator_output_dir(translator_state.get("output_dir", ""))
         self.translator_selected_srt_path = translator_state.get("selected_srt_path", "")
@@ -757,6 +768,7 @@ class App(QMainWindow):
                     "target_lang": self.target_lang_combo.currentData() or "vi",
                     "chars_per_second": self._current_chars_per_second(),
                     "max_merged_chars": self._current_max_merged_chars(),
+                    "max_gap_ms": self._current_max_gap_ms(),
                     "custom_prompt": self.translator_custom_prompt.toPlainText().strip(),
                 },
                 "text_input": self.translator_textbox.toPlainText(),
@@ -832,10 +844,12 @@ class App(QMainWindow):
                 subs = parse_srt(self.translator_srt_content)
                 stats_suffix = ""
                 max_merged_chars = self._current_max_merged_chars()
-                subs, stats = normalize_srt_blocks(subs, max_merged_chars=max_merged_chars)
+                max_gap_ms = self._current_max_gap_ms()
+                subs, stats = normalize_srt_blocks(subs, max_merged_chars=max_merged_chars, max_gap_ms=max_gap_ms)
                 stats_suffix = (
                     f", chuẩn hóa {stats['original_blocks']} -> {stats['normalized_blocks']} block"
                     f", max gộp {int(max_merged_chars)} ký tự"
+                    f", gap <= {int(max_gap_ms)}ms"
                 )
                 chars_per_second = self._current_chars_per_second()
                 items = build_srt_items(subs, chars_per_second=chars_per_second)
@@ -910,6 +924,14 @@ class App(QMainWindow):
         except ValueError:
             return 220.0
         return max(40.0, min(1000.0, value))
+
+    def _current_max_gap_ms(self) -> float:
+        raw = (self.max_gap_ms_input.text() or "").strip().replace(",", ".")
+        try:
+            value = float(raw)
+        except ValueError:
+            return 320.0
+        return max(0.0, min(5000.0, value))
 
     def persist_state(self):
         if self._restoring_state:
@@ -1383,19 +1405,22 @@ class App(QMainWindow):
         target_lang = self.target_lang_combo.currentData() or "vi"
         chars_per_second = self._current_chars_per_second()
         max_merged_chars = self._current_max_merged_chars()
+        max_gap_ms = self._current_max_gap_ms()
         custom_prompt = self.translator_custom_prompt.toPlainText().strip()
         model = self.translator_model_combo.currentText()
         api_key = self._current_translator_api_key()
         subs = parse_srt(content)
-        subs, stats = normalize_srt_blocks(subs, max_merged_chars=max_merged_chars)
+        subs, stats = normalize_srt_blocks(subs, max_merged_chars=max_merged_chars, max_gap_ms=max_gap_ms)
         self.append_translator_log(
-            f"Đã chuẩn hóa SRT trước khi dịch: {stats['original_blocks']} -> {stats['normalized_blocks']} block, max gộp {int(max_merged_chars)} ký tự."
+            "Đã chuẩn hóa SRT trước khi dịch: "
+            f"{stats['original_blocks']} -> {stats['normalized_blocks']} block, "
+            f"max gộp {int(max_merged_chars)} ký tự, gap <= {int(max_gap_ms)}ms."
         )
         items = build_srt_items(subs, chars_per_second=chars_per_second)
         normalized_content = serialize_srt(subs)
         job_hash = build_job_hash(
             "srt",
-            f"{normalized_content}|cps={chars_per_second}|merge_chars={max_merged_chars}",
+            f"{normalized_content}|cps={chars_per_second}|merge_chars={max_merged_chars}|gap_ms={max_gap_ms}",
             source_lang,
             target_lang,
         )

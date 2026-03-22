@@ -49,6 +49,7 @@ DEFAULT_STATE: Dict[str, Any] = {
             "target_lang": "vi",
             "chars_per_second": 32.0,
             "max_merged_chars": 220.0,
+            "max_gap_ms": 320.0,
             "custom_prompt": "",
         },
         "text_input": "",
@@ -113,6 +114,12 @@ def _normalize_legacy_state(data: Dict[str, Any]) -> Dict[str, Any]:
         )
     except (TypeError, ValueError):
         translator["preferences"]["max_merged_chars"] = 220.0
+    try:
+        translator["preferences"]["max_gap_ms"] = float(
+            translator["preferences"].get("max_gap_ms", 320.0)
+        )
+    except (TypeError, ValueError):
+        translator["preferences"]["max_gap_ms"] = 320.0
     translator["preferences"]["custom_prompt"] = str(translator["preferences"].get("custom_prompt", "") or "")
     normalized["translator"] = translator
 

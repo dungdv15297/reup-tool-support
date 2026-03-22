@@ -11,6 +11,7 @@ build/
 
 # App runtime
 user_settings.json
+config.json
 
 # OS
 .DS_Store

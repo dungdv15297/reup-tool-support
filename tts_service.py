@@ -177,6 +177,35 @@ def fit_audio_to_duration(file_path: str, target_duration_ms: int) -> int:
                 pass
 
 
+def apply_audio_speed(file_path: str, speed: float) -> int:
+    target_speed = clamp_speed(speed)
+    if abs(target_speed - 1.0) < 0.01:
+        return get_audio_duration(file_path)
+
+    temp_output = _tmp_mp3_path()
+    try:
+        command = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            file_path,
+            "-filter:a",
+            build_atempo_filter(target_speed),
+            "-vn",
+            temp_output,
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        adjusted_duration_ms = get_audio_duration(temp_output)
+        os.replace(temp_output, file_path)
+        return adjusted_duration_ms
+    finally:
+        if os.path.exists(temp_output):
+            try:
+                os.remove(temp_output)
+            except OSError:
+                pass
+
+
 def get_provider_concurrency(provider_id: str, total_entries: int) -> int:
     defaults = {
         "edge": 10,
@@ -631,13 +660,16 @@ async def synthesize_text(
         raise ProcessingCancelledError("Đã dừng xử lý theo yêu cầu người dùng.")
 
     async def _run():
-        await provider.synthesize(normalized_text, voice_id, clamp_speed(speed), output_path)
+        await provider.synthesize(normalized_text, voice_id, 1.0, output_path)
         return output_path
 
     _progress(progress_callback, 0.15, f"Đang gọi {provider.label}...")
     path = await _retry_async(_run, progress_callback, f"Gọi {provider.label}", cancel_callback)
     if cancel_callback and cancel_callback():
         raise ProcessingCancelledError("Đã dừng xử lý theo yêu cầu người dùng.")
+    if abs(clamp_speed(speed) - 1.0) >= 0.01:
+        _progress(progress_callback, 0.85, f"Đang tinh chỉnh tốc độ {clamp_speed(speed):.1f}x mà không đổi pitch...")
+        await asyncio.to_thread(apply_audio_speed, path, speed)
     _progress(progress_callback, 1.0, "Đã tạo xong file âm thanh.")
     return path
 
@@ -717,18 +749,25 @@ async def process_srt_logic(
             seg_path = _tmp_mp3_path()
             temp_files.append(seg_path)
 
-            async def _run(target_speed: float):
-                await provider.synthesize(entry["text"], voice, clamp_speed(target_speed), seg_path)
+            async def _run():
+                await provider.synthesize(entry["text"], voice, 1.0, seg_path)
                 return seg_path
 
             await _retry_async(
-                lambda: _run(1.0),
+                _run,
                 progress_callback,
                 f"Tạo audio block {index + 1}/{total}",
                 cancel_callback,
             )
 
             duration_ms = get_audio_duration(seg_path)
+            if abs(clamp_speed(speed) - 1.0) >= 0.01:
+                _progress(
+                    progress_callback,
+                    0.05 + (index / max(total, 1)) * 0.75,
+                    f"Đang chỉnh tốc độ block {index + 1}/{total} sang {clamp_speed(speed):.1f}x mà không đổi pitch...",
+                )
+                duration_ms = await asyncio.to_thread(apply_audio_speed, seg_path, speed)
             target_duration_ms = entry["duration_ms"]
             compressed = False
             if target_duration_ms > 0 and duration_ms > target_duration_ms:
@@ -764,7 +803,7 @@ async def process_srt_logic(
                 "start_ms": entry["start_ms"],
                 "end_ms": entry["end_ms"],
                 "duration_ms": duration_ms,
-                "used_speed": 1.0,
+                "used_speed": clamp_speed(speed),
                 "compressed_to_fit": compressed,
                 "index": index,
             }

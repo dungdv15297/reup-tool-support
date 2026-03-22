@@ -27,11 +27,13 @@ Tính năng cho phép người dùng biên dịch nội dung văn bản thuần 
 - API key được nhập ngay trên giao diện local app theo provider đang chọn
 - Hệ thống lưu vào `config.json`
 - Toàn bộ API key và nơi lưu output được cấu hình trong popup `Settings`
+- Có ô `Custom prompt` trong popup `Settings` cho `Phiên dịch viên`
 - Với file `.srt`, user chọn thêm giới hạn `ký tự/giây` để prompt ép bản dịch khớp tốt hơn với thời lượng subtitle
 - Với Google Gemini:
   - User nhập API key trước
   - Hệ thống gọi API để load model khả dụng
 - Các lần sau app tự load lại key, model và preferences
+- `Custom prompt` được lưu lại trong `config.json` và tự nạp lại ở các lần mở sau
 
 ## 4. Tối ưu kỹ thuật
 
@@ -44,6 +46,7 @@ Tính năng cho phép người dùng biên dịch nội dung văn bản thuần 
 - Hiển thị estimate token trước khi dịch cho text và SRT
 - Với SRT, mỗi subtitle được tính `max_chars = duration_seconds * chars_per_second`
 - Giới hạn này chỉ dùng để truyền tải ràng buộc vào prompt; app không tự cắt bản dịch sau khi model trả về
+- SRT luôn được chuẩn hóa trước khi dịch, và user có thể nhập `Ký tự tối đa được gộp` để kiểm soát độ dài mỗi cụm sau chuẩn hóa
 
 ## 5. UX/UI
 
@@ -54,6 +57,7 @@ Tính năng cho phép người dùng biên dịch nội dung văn bản thuần 
 - Log riêng cho phiên dịch
 - Có nút `Dịch tiếp bản gần nhất`
 - Có lựa chọn `ký tự/giây` cho SRT, mặc định `32`
+- Có ô nhập `Ký tự tối đa được gộp`, mặc định `220`
 
 ## 6. Prompting
 
@@ -61,3 +65,4 @@ Tính năng cho phép người dùng biên dịch nội dung văn bản thuần 
 - Không phá cấu trúc SRT
 - Trả về JSON để app ghép lại an toàn
 - Với SRT, prompt yêu cầu từng mục cố gắng không vượt quá `max_chars` theo thời lượng subtitle nhưng vẫn phải giữ câu tự nhiên, liền mạch
+- Nếu user nhập `Custom prompt`, nội dung đó sẽ được gắn thêm vào system prompt khi dịch

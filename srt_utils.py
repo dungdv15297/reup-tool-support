@@ -36,3 +36,90 @@ def serialize_srt(subs):
             )
         )
     return "\n\n".join(blocks).rstrip() + "\n"
+
+
+def _time_to_ms(subrip_time):
+    return (
+        (subrip_time.hours * 3600 + subrip_time.minutes * 60 + subrip_time.seconds) * 1000
+        + subrip_time.milliseconds
+    )
+
+
+def _is_strong_sentence_end(text):
+    return (text or "").rstrip().endswith((".", "!", "?", "...", "…", "。", "！", "？"))
+
+
+def normalize_srt_blocks(
+    subs,
+    min_duration_ms=1200,
+    min_chars=18,
+    max_gap_ms=320,
+    max_merge_blocks=8,
+    max_merged_duration_ms=14000,
+    max_merged_chars=220,
+):
+    if not subs:
+        return pysrt.SubRipFile(), {"original_blocks": 0, "normalized_blocks": 0, "merged_blocks": 0}
+
+    normalized = []
+    buffer_item = None
+    buffer_count = 0
+
+    def flush_buffer():
+        nonlocal buffer_item, buffer_count
+        if buffer_item is not None:
+            buffer_item.index = len(normalized) + 1
+            normalized.append(buffer_item)
+        buffer_item = None
+        buffer_count = 0
+
+    for sub in subs:
+        text = (sub.text or "").strip()
+        if buffer_item is None:
+            buffer_item = pysrt.SubRipItem(index=1, start=sub.start, end=sub.end, text=text)
+            buffer_count = 1
+            continue
+
+        current_text = (buffer_item.text or "").strip()
+        current_duration_ms = _time_to_ms(buffer_item.end) - _time_to_ms(buffer_item.start)
+        next_duration_ms = _time_to_ms(sub.end) - _time_to_ms(sub.start)
+        gap_ms = _time_to_ms(sub.start) - _time_to_ms(buffer_item.end)
+        merged_chars = len((current_text + " " + text).strip())
+        merged_duration_ms = _time_to_ms(sub.end) - _time_to_ms(buffer_item.start)
+
+        merge_due_to_short = (
+            current_duration_ms < min_duration_ms
+            or next_duration_ms < min_duration_ms
+            or len(current_text) < min_chars
+            or len(text) < min_chars
+        )
+        merge_due_to_sentence = not _is_strong_sentence_end(current_text)
+        merge_due_to_gap = gap_ms <= max_gap_ms
+        within_limits = (
+            buffer_count < max_merge_blocks
+            and merged_duration_ms <= max_merged_duration_ms
+            and merged_chars <= max_merged_chars
+        )
+
+        merge_due_to_continuation = text[:1].islower() or text[:1] in {",", ".", ":", ";", "-", "(", "["}
+        if within_limits and (
+            merge_due_to_short
+            or (merge_due_to_sentence and merge_due_to_gap)
+            or (merge_due_to_continuation and merge_due_to_gap)
+        ):
+            buffer_item.text = (current_text + "\n" + text).strip()
+            buffer_item.end = sub.end
+            buffer_count += 1
+            continue
+
+        flush_buffer()
+        buffer_item = pysrt.SubRipItem(index=1, start=sub.start, end=sub.end, text=text)
+        buffer_count = 1
+
+    flush_buffer()
+    normalized_subs = pysrt.SubRipFile(items=normalized)
+    return normalized_subs, {
+        "original_blocks": len(subs),
+        "normalized_blocks": len(normalized_subs),
+        "merged_blocks": max(0, len(subs) - len(normalized_subs)),
+    }

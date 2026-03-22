@@ -37,7 +37,7 @@ except ImportError:  # pragma: no cover
     QMediaPlayer = None
 
 from app_state import load_state, save_state
-from srt_utils import parse_srt, serialize_srt
+from srt_utils import normalize_srt_blocks, parse_srt, serialize_srt
 from translator_service import (
     LANGUAGE_OPTIONS,
     apply_translations_to_subs,
@@ -292,12 +292,19 @@ class App(QMainWindow):
         self.translator_google_api_key, gemini_widget = self.create_secret_input()
         self.translator_google_api_key.textChanged.connect(self.persist_state)
         llm_form.addRow("Google Gemini API key (cho Phiên dịch viên):", gemini_widget)
+        self.translator_custom_prompt = QTextEdit()
+        self.translator_custom_prompt.setMaximumHeight(120)
+        self.translator_custom_prompt.textChanged.connect(self.persist_state)
+        llm_form.addRow("Custom prompt cho Phiên dịch viên:", self.translator_custom_prompt)
         layout.addWidget(llm_group)
 
         action_row = QHBoxLayout()
         self.btn_save_global_config = QPushButton("Lưu cấu hình dùng chung")
         self.btn_save_global_config.clicked.connect(self.save_global_config)
         action_row.addWidget(self.btn_save_global_config)
+        self.btn_clear_logs = QPushButton("Xóa toàn bộ log cũ")
+        self.btn_clear_logs.clicked.connect(self.clear_all_logs)
+        action_row.addWidget(self.btn_clear_logs)
         action_row.addStretch(1)
         layout.addLayout(action_row)
         layout.addStretch(1)
@@ -546,11 +553,22 @@ class App(QMainWindow):
         self.chars_per_second_note.setStyleSheet("color: #475569;")
         grid.addWidget(self.chars_per_second_note, 2, 2, 1, 2)
 
+        self.max_merged_chars_input = QLineEdit()
+        self.max_merged_chars_input.setPlaceholderText("Ví dụ: 220")
+        self.max_merged_chars_input.textChanged.connect(self.on_translator_srt_options_changed)
+        grid.addWidget(QLabel("Ký tự tối đa được gộp:"), 3, 0)
+        grid.addWidget(self.max_merged_chars_input, 3, 1)
+
+        self.normalize_srt_note = QLabel("SRT sẽ luôn được chuẩn hóa trước khi dịch; tham số này quyết định độ dài tối đa của mỗi cụm gộp.")
+        self.normalize_srt_note.setWordWrap(True)
+        self.normalize_srt_note.setStyleSheet("color: #475569;")
+        grid.addWidget(self.normalize_srt_note, 3, 2, 1, 2)
+
         self.translator_estimate_label = QLabel("Estimate tokens: chưa có dữ liệu.")
         self.translator_estimate_label.setWordWrap(True)
         self.translator_estimate_label.setStyleSheet("color: #475569;")
-        grid.addWidget(QLabel("Estimate:"), 3, 0)
-        grid.addWidget(self.translator_estimate_label, 3, 1, 1, 3)
+        grid.addWidget(QLabel("Estimate:"), 4, 0)
+        grid.addWidget(self.translator_estimate_label, 4, 1, 1, 3)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
         layout.addLayout(grid)
@@ -670,10 +688,14 @@ class App(QMainWindow):
         self.translator_model_combo.setCurrentText(translator_state.get("selected_llm_model", "deepseek-chat"))
         self.translator_deepseek_api_key.setText(translator_state.get("api_keys", {}).get("deepseek", ""))
         self.translator_google_api_key.setText(translator_state.get("api_keys", {}).get("google", ""))
+        self.translator_custom_prompt.setPlainText(translator_state.get("preferences", {}).get("custom_prompt", ""))
         self.source_lang_combo.setCurrentIndex(max(0, self.source_lang_combo.findData(translator_state.get("preferences", {}).get("source_lang", "auto"))))
         self.target_lang_combo.setCurrentIndex(max(0, self.target_lang_combo.findData(translator_state.get("preferences", {}).get("target_lang", "vi"))))
         self.chars_per_second_input.setText(
             str(float(translator_state.get("preferences", {}).get("chars_per_second", 32.0))).rstrip("0").rstrip(".")
+        )
+        self.max_merged_chars_input.setText(
+            str(float(translator_state.get("preferences", {}).get("max_merged_chars", 220.0))).rstrip("0").rstrip(".")
         )
         self.translator_textbox.setPlainText(translator_state.get("text_input", ""))
         self.set_translator_output_dir(translator_state.get("output_dir", ""))
@@ -734,6 +756,8 @@ class App(QMainWindow):
                     "source_lang": self.source_lang_combo.currentData() or "auto",
                     "target_lang": self.target_lang_combo.currentData() or "vi",
                     "chars_per_second": self._current_chars_per_second(),
+                    "max_merged_chars": self._current_max_merged_chars(),
+                    "custom_prompt": self.translator_custom_prompt.toPlainText().strip(),
                 },
                 "text_input": self.translator_textbox.toPlainText(),
                 "selected_srt_path": self.translator_selected_srt_path or "",
@@ -806,13 +830,20 @@ class App(QMainWindow):
         if self.translator_srt_content:
             try:
                 subs = parse_srt(self.translator_srt_content)
+                stats_suffix = ""
+                max_merged_chars = self._current_max_merged_chars()
+                subs, stats = normalize_srt_blocks(subs, max_merged_chars=max_merged_chars)
+                stats_suffix = (
+                    f", chuẩn hóa {stats['original_blocks']} -> {stats['normalized_blocks']} block"
+                    f", max gộp {int(max_merged_chars)} ký tự"
+                )
                 chars_per_second = self._current_chars_per_second()
                 items = build_srt_items(subs, chars_per_second=chars_per_second)
                 estimate = estimate_job_tokens(items)
                 max_chars_total = sum(item.max_chars or 0 for item in items)
                 self.translator_srt_estimate_label.setText(
                     f"{estimate['items']} dòng, {estimate['batches']} batch, ~{estimate['total_tokens']} tokens "
-                    f"(max batch ~{estimate['max_batch_tokens']}, giới hạn ~{max_chars_total} ký tự ở {int(chars_per_second)} ký tự/s)"
+                    f"(max batch ~{estimate['max_batch_tokens']}, giới hạn ~{max_chars_total} ký tự ở {int(chars_per_second)} ký tự/s{stats_suffix})"
                 )
             except Exception:
                 self.translator_srt_estimate_label.setText("Estimate tokens file SRT: không đọc được nội dung.")
@@ -860,6 +891,10 @@ class App(QMainWindow):
         self.persist_state()
         self.update_translator_estimate_labels()
 
+    def on_translator_srt_options_changed(self):
+        self.persist_state()
+        self.update_translator_estimate_labels()
+
     def _current_chars_per_second(self) -> float:
         raw = (self.chars_per_second_input.text() or "").strip().replace(",", ".")
         try:
@@ -867,6 +902,14 @@ class App(QMainWindow):
         except ValueError:
             return 32.0
         return max(1.0, min(200.0, value))
+
+    def _current_max_merged_chars(self) -> float:
+        raw = (self.max_merged_chars_input.text() or "").strip().replace(",", ".")
+        try:
+            value = float(raw)
+        except ValueError:
+            return 220.0
+        return max(40.0, min(1000.0, value))
 
     def persist_state(self):
         if self._restoring_state:
@@ -1016,6 +1059,10 @@ class App(QMainWindow):
         self.tts_selected_srt_path = file_path
         self.srt_info_label.setText(f"Đã chọn: {os.path.basename(file_path)}")
         self.update_tts_estimate_labels()
+        provider = self.capability_map.get(self.provider_combo.currentData(), {})
+        status = provider.get("status", {})
+        ready = status.get("configured") == "true" and self.voice_combo.count() > 0
+        self.btn_gen_srt.setEnabled(ready and self.tts_srt_content is not None)
         self.persist_state()
 
     def select_tts_srt_file(self):
@@ -1029,6 +1076,7 @@ class App(QMainWindow):
             self.translator_srt_content = handle.read()
         self.translator_selected_srt_path = file_path
         self.translator_srt_info_label.setText(f"Đã chọn: {os.path.basename(file_path)}")
+        self.btn_translate_srt.setEnabled(True)
         self.persist_state()
         self.update_translator_estimate_labels()
 
@@ -1055,6 +1103,14 @@ class App(QMainWindow):
         self.append_tts_log("Đã lưu cấu hình dùng chung.")
         self.append_translator_log("Đã lưu cấu hình dùng chung.")
         self.load_capabilities()
+
+    def clear_all_logs(self):
+        self.tts_log.clear()
+        self.translator_log.clear()
+        self.state.setdefault("tts", {})["logs"] = []
+        self.state.setdefault("translator", {})["logs"] = []
+        save_state(self.build_state_from_ui())
+        QMessageBox.information(self, "Hoàn tất", "Đã xóa toàn bộ log cũ.")
 
     def _run_async(self, coro):
         loop = asyncio.new_event_loop()
@@ -1277,6 +1333,7 @@ class App(QMainWindow):
         llm_provider = self.translator_provider_combo.currentData() or "deepseek"
         source_lang = self.source_lang_combo.currentData() or "auto"
         target_lang = self.target_lang_combo.currentData() or "vi"
+        custom_prompt = self.translator_custom_prompt.toPlainText().strip()
         model = self.translator_model_combo.currentText()
         api_key = self._current_translator_api_key()
         items = translate_plain_text_to_items(text)
@@ -1292,6 +1349,7 @@ class App(QMainWindow):
                     model=model,
                     source_lang=source_lang,
                     target_lang=target_lang,
+                    custom_prompt=custom_prompt,
                     existing_translations=existing,
                     progress_callback=lambda p, t: self.translator_progress_signal.emit(int(p * 100), t),
                     checkpoint_callback=lambda data: self._translator_checkpoint(job_hash, "text", source_lang, target_lang, data),
@@ -1324,11 +1382,23 @@ class App(QMainWindow):
         source_lang = self.source_lang_combo.currentData() or "auto"
         target_lang = self.target_lang_combo.currentData() or "vi"
         chars_per_second = self._current_chars_per_second()
+        max_merged_chars = self._current_max_merged_chars()
+        custom_prompt = self.translator_custom_prompt.toPlainText().strip()
         model = self.translator_model_combo.currentText()
         api_key = self._current_translator_api_key()
         subs = parse_srt(content)
+        subs, stats = normalize_srt_blocks(subs, max_merged_chars=max_merged_chars)
+        self.append_translator_log(
+            f"Đã chuẩn hóa SRT trước khi dịch: {stats['original_blocks']} -> {stats['normalized_blocks']} block, max gộp {int(max_merged_chars)} ký tự."
+        )
         items = build_srt_items(subs, chars_per_second=chars_per_second)
-        job_hash = build_job_hash("srt", f"{content}|cps={chars_per_second}", source_lang, target_lang)
+        normalized_content = serialize_srt(subs)
+        job_hash = build_job_hash(
+            "srt",
+            f"{normalized_content}|cps={chars_per_second}|merge_chars={max_merged_chars}",
+            source_lang,
+            target_lang,
+        )
         resume = self.state.get("translator", {}).get("resume", {})
         existing = parse_resume_payload(resume) if resume.get("job_hash") == job_hash else {}
         try:
@@ -1340,6 +1410,7 @@ class App(QMainWindow):
                     model=model,
                     source_lang=source_lang,
                     target_lang=target_lang,
+                    custom_prompt=custom_prompt,
                     existing_translations=existing,
                     progress_callback=lambda p, t: self.translator_progress_signal.emit(int(p * 100), t),
                     checkpoint_callback=lambda data: self._translator_checkpoint(job_hash, "srt", source_lang, target_lang, data),
